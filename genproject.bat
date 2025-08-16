@@ -1,0 +1,1 @@
+xmake project --archs="x86" -k vsxmake2022 -y
