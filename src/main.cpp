@@ -316,8 +316,6 @@ struct TwoLayerTransport {
   }
 };
 
-#pragma optimize("", off)
-
 void ModOverridesState::CollectModOverrides(DB* dieselDb) {
   this->overrides.clear();
 
