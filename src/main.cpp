@@ -61,7 +61,7 @@ MH_STATUS_CHECK(#classname "::" #name " EnableHook", status)\
 }
 
 #define X86_THISCALL_HOOK_HELPER_HOOK_CLASS_FUNCTION(classname, name, pattern, mask) \
-X86_THISCALL_HOOK_HELPER_HOOK_CLASS_FUNCTION_ADDRESS(classname, name, FindPattern("payday_win32_release.exe", #classname "::" #name, pattern, mask));
+X86_THISCALL_HOOK_HELPER_HOOK_CLASS_FUNCTION_ADDRESS(classname, name, FindPattern(gameexecutable, #classname "::" #name, pattern, mask));
 
 #pragma endregion
 
@@ -211,8 +211,12 @@ struct PDTH_MSVC2008_string {
   PDTH_MSVC2008_string() { data[0] = 0; _Mysize = 0; _Myres = 15; }
 
   inline static void (PDTH_MSVC2008_string::* assign_func)(const char* _Ptr);
+  inline static void (PDTH_MSVC2008_string::* assign_func_len)(const char* _Ptr, unsigned int len);
   void assign(const char* _Ptr) {
     (this->*assign_func)(_Ptr);
+  }
+  void assign(const char* _Ptr, unsigned int len) {
+    (this->*assign_func_len)(_Ptr, len);
   }
 
   char PAD[3];
@@ -255,7 +259,7 @@ private:
 public:
   static FileDataStore* create(const std::filesystem::path& path) {
     PDTH_MSVC2008_string path_str = PDTH_MSVC2008_string();
-    path_str.assign(path.string().c_str());
+    path_str.assign((char*)path.u8string().c_str(), path.u8string().size()); // FileDataStore's constructor accepts utf8 strings (dsl::utf8_to_wstr gets called before being passed to CreateFileW)
 
     FileDataStore* ds = (FileDataStore*)diesel_malloc(60);
     memset(ds, 0, 60);
@@ -328,8 +332,6 @@ void ModOverridesState::CollectModOverrides(DB* dieselDb) {
     if (!std::filesystem::is_directory(path))
       continue;
 
-    size_t parentPathSize = path.string().size();
-
     for (std::filesystem::recursive_directory_iterator modPathIterator(path), modPathEnd; modPathIterator != modPathEnd; ++modPathIterator) {
       auto& assetsPath = modPathIterator->path();
       if (std::filesystem::is_directory(assetsPath) || !assetsPath.has_extension())
@@ -339,7 +341,7 @@ void ModOverridesState::CollectModOverrides(DB* dieselDb) {
       pathName.replace_extension();
 
       auto type = assetsPath.extension().string().substr(1);
-      auto name = pathName.string().substr(parentPathSize + 1); // +1 is for the remaining path separator at the end
+      auto name = std::filesystem::relative(pathName, path).u8string();
       std::replace(name.begin(), name.end(), '\\', '/');
 
       if (type == "dds") {
@@ -348,8 +350,8 @@ void ModOverridesState::CollectModOverrides(DB* dieselDb) {
         type = "movie";
       }
 
-      dsl::idstring type_id = hash64(type);
-      dsl::idstring name_id = hash64(name);
+      dsl::idstring type_id = hash64((char*)type.c_str());
+      dsl::idstring name_id = hash64((char*)name.c_str());
 
       auto upper = dieselDb->upper_bound(type_id, name_id);
       auto lower = dieselDb->lower_bound(type_id, name_id);
@@ -370,16 +372,19 @@ void ModOverridesState::CollectModOverrides(DB* dieselDb) {
   }
 }
 
-#define GET_CLASS_FUNC(dest, pattern, mask) *((size_t*)get_class_func_addr(&dest)) = FindPattern("payday_win32_release.exe", #dest, pattern, mask);
+#define GET_CLASS_FUNC(dest, pattern, mask) *((size_t*)get_class_func_addr(&dest)) = FindPattern(gameexecutable, #dest, pattern, mask);
 void setup_modoverrides_mod() {
+  const char* gameexecutable = "payday_win32_release.exe";
+
   GET_CLASS_FUNC(CONCAT_ARGS(SortMap<DBExtKey,unsigned int>::lower_bound_index_func), "\x83\xEC\x00\x55\x56\x57\x8B\xF9\x8B\x77\x00\xC7\x44\x24", "xx?xxxxxxx?xxx");
   GET_CLASS_FUNC(CONCAT_ARGS(SortMap<DBExtKey,unsigned int>::upper_bound_index_func), "\x83\xEC\x00\x53\x55\x56\x8B\xF1\x8B\x5E\x00\xC7\x44\x24", "xx?xxxxxxx?xxx");
 
   GET_CLASS_FUNC(FileDataStore::constructor, "\x6A\x00\x68\x00\x00\x00\x00\x64\xA1\x00\x00\x00\x00\x50\x64\x89\x25\x00\x00\x00\x00\x83\xEC\x00\x53\x56\x8B\xF1\x57\x89\x74\x24\x00\x8B\x7C\x24", "x?x????xx????xxxx????xx?xxxxxxxx?xxx");
   GET_CLASS_FUNC(Archive::constructor, "\x6A\x00\x68\x00\x00\x00\x00\x64\xA1\x00\x00\x00\x00\x50\x64\x89\x25\x00\x00\x00\x00\x51\x8B\x44\x24\x00\x53\x56\x8B\xF1\x33\xDB\x6A\x00\x53\xC7\x46\x00\x00\x00\x00\x00\x89\x5E\x00\x50\x89\x74\x24\x00\x88\x5E\x00\xE8\x00\x00\x00\x00\x8B\x4C\x24", "x?x????xx????xxxx????xxxx?xxxxxxx?xxx?????xx?xxxx?xx?x????xxx");
   GET_CLASS_FUNC(PDTH_MSVC2008_string::assign_func, "\x56\x8B\x74\x24\x00\x8B\xC6\x57\x8D\x78\x00\xEB\x00\x8D\x49\x00\x8A\x10\x40\x84\xD2\x75\x00\x2B\xC7\x50\x56\xE8", "xxxx?xxxxx?x?xx?xxxxxx?xxxxx");
+  GET_CLASS_FUNC(PDTH_MSVC2008_string::assign_func_len, "\x55\x8B\x6C\x24\x00\x56\x57\x8B\xF1\x85\xED", "xxxx?xxxxxx");
 
-  *((size_t*)&diesel_malloc) = (size_t)GetModuleHandle("payday_win32_release.exe") + 0x38C270;
+  *((size_t*)&diesel_malloc) = (size_t)GetModuleHandle(gameexecutable) + 0x38C270;
 
   X86_THISCALL_HOOK_HELPER_HOOK_CLASS_FUNCTION(DB, load, "\x6A\x00\x68\x00\x00\x00\x00\x64\xA1\x00\x00\x00\x00\x50\x64\x89\x25\x00\x00\x00\x00\x81\xEC\x00\x00\x00\x00\x53\x55\x56\x57\x33\xDB\x53", "x?x????xx????xxxx????xx????xxxxxxx");
   X86_THISCALL_HOOK_HELPER_HOOK_CLASS_FUNCTION(TwoLayerTransport, open, "\x6A\x00\x68\x00\x00\x00\x00\x64\xA1\x00\x00\x00\x00\x50\x64\x89\x25\x00\x00\x00\x00\x83\xEC\x00\x56\x8B\xF1\x83\x7E\x00\x00\x57", "x?x????xx????xxxx????xx?xxxxx??x");
