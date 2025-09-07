@@ -1,7 +1,8 @@
 --add_requires("wxwidgets 3.2.0")
 add_requires("minhook")
 
-includes("version_proxy")
+includes("proxies/dinput8")
+--includes("proxies/version")
 
 set_runtimes("MD")
 
@@ -19,7 +20,7 @@ target("PDTHModOverrides")
   add_packages("minhook")
   --add_defines("__WXMSW__", "WXUSINGDLL")
 
-  add_files("./src/*.cpp")
-  add_headerfiles("./src/*.h")
+  add_files("./src/**.cpp")
+  add_headerfiles("./src/**.h")
   add_includedirs("./src/")
 target_end()

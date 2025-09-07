@@ -4,89 +4,17 @@
 
 #include <MinHook.h>
 
-#include <algorithm>
 
 #include "ModOverridesState.h"
+#include "diesel.h"
+#include "hash.h"
 
+#include "hookhelpers.h"
+
+#include <algorithm>
 #include <iostream>
 #include <set>
 
-#include "hash.h"
-
-#define CONCAT_IMPL(...) __VA_ARGS__
-#define CONCAT_ARGS(...) CONCAT_IMPL(__VA_ARGS__)
-
-#pragma region Hook Helpers
-
-size_t FindPattern(const char* module, const char* funcname, const char* pattern, const char* mask);
-
-#define X86_THISCALL_HOOK_HELPER_DEFINE_FUNCTION(classname, name, returnvalue, args) \
-inline static returnvalue (classname::* o_##name)(args); \
-returnvalue h_##name(args)
-
-template<typename T>
-void* get_class_func_addr(T* func)
-{
-  union {
-    T* pfunc;
-    void* addr;
-  };
-  pfunc = func;
-  return addr;
-}
-
-template<typename classT, typename memberT>
-void* get_class_func_addr(memberT classT::* func)
-{
-  union {
-    memberT classT::* pfunc;
-    void* addr;
-  };
-  pfunc = func;
-  return addr;
-}
-
-#define MH_STATUS_CHECK(debugname, status)\
-if(status != MH_OK) {\
-std::cout << debugname ": " << MH_StatusToString(status);\
-}
-
-#define X86_THISCALL_HOOK_HELPER_HOOK_CLASS_FUNCTION_ADDRESS(classname, name, address) \
-{\
-auto addr = (void*)address;\
-MH_STATUS status = MH_CreateHook((LPVOID)addr, get_class_func_addr(&classname::h_##name), (LPVOID*)get_class_func_addr(&classname::o_##name));\
-MH_STATUS_CHECK(#classname "::" #name " CreateHook", status)\
-status = MH_EnableHook((LPVOID)addr);\
-MH_STATUS_CHECK(#classname "::" #name " EnableHook", status)\
-}
-
-#define X86_THISCALL_HOOK_HELPER_HOOK_CLASS_FUNCTION(classname, name, pattern, mask) \
-X86_THISCALL_HOOK_HELPER_HOOK_CLASS_FUNCTION_ADDRESS(classname, name, FindPattern(gameexecutable, #classname "::" #name, pattern, mask));
-
-#pragma endregion
-
-template<typename TFirst, typename TSecond> struct Pair {
-  TFirst first;
-  TSecond second;
-};
-template<typename TValue> struct Vector {
-  unsigned int _size;
-  unsigned int _capacity;
-  TValue* _data;
-  void* _allocator;
-};
-template<typename TKey, typename TValue> struct SortMap {
-  char _less[0x4]; // std::_less
-  Vector<Pair<TKey, TValue>> _data;
-  bool _is_sorted;
-
-  inline static unsigned int (SortMap<TKey, TValue>::* lower_bound_index_func)(const TKey* k);
-  inline static unsigned int (SortMap<TKey, TValue>::* upper_bound_index_func)(const TKey* k);
-
-
-  unsigned int lower_bound_index(const TKey* k) {return (this->*lower_bound_index_func)(k); }
-  unsigned int upper_bound_index(const TKey* k) {return (this->*upper_bound_index_func)(k); }
-};
 
 void* (__cdecl* diesel_malloc)(unsigned int size);
 
@@ -121,7 +49,9 @@ __declspec(dllexport) void __stdcall AddTwoLayerTransportHook(TwoLayerTransportH
 }
 __declspec(dllexport) void __stdcall RemoveTwoLayerTransportHook(TwoLayerTransportHook hook)
 {
-  extraTwoLayerTransportHooks.erase(std::find(extraTwoLayerTransportHooks.begin(), extraTwoLayerTransportHooks.end(), hook));
+  auto find = std::find(extraTwoLayerTransportHooks.begin(), extraTwoLayerTransportHooks.end(), hook);
+  if(find != extraTwoLayerTransportHooks.end())
+    extraTwoLayerTransportHooks.erase(find);
 }
 __declspec(dllexport) TwoLayerTransportHook* __stdcall GetTwoLayerTransportHooks()
 {
@@ -138,7 +68,9 @@ __declspec(dllexport) void __stdcall AddDBLoadHook(DBLoadHook hook)
 }
 __declspec(dllexport) void __stdcall RemoveDBLoadHook(DBLoadHook hook)
 {
-  extraDBLoadHooks.erase(std::find(extraDBLoadHooks.begin(), extraDBLoadHooks.end(), hook));
+  auto find = std::find(extraDBLoadHooks.begin(), extraDBLoadHooks.end(), hook);
+  if(find != extraDBLoadHooks.end())
+    extraDBLoadHooks.erase(find);
 }
 __declspec(dllexport) DBLoadHook* __stdcall GetDBLoadHooks()
 {
@@ -188,7 +120,7 @@ struct DB {
     return this->_data->_lookup.upper_bound_index(&k);
   }
 
-  X86_THISCALL_HOOK_HELPER_DEFINE_FUNCTION(DB, load, int) {
+  X86_THISCALL_HOOK_HELPER_DEFINE_FUNCTION(DB, load, int, CONCAT_ARGS()) {
     auto ret = (this->*o_load)();
 
     for (auto& hook : extraDBLoadHooks) {
@@ -206,37 +138,6 @@ static_assert(offsetof(PropertiesMap, _data) == 4);
 static_assert(offsetof(PropertiesMap, _is_sorted) == 20);
 static_assert(offsetof(decltype(PropertiesMap::_data), _data) == 8);
 
-
-struct PDTH_MSVC2008_string {
-  PDTH_MSVC2008_string() { data[0] = 0; _Mysize = 0; _Myres = 15; }
-
-  inline static void (PDTH_MSVC2008_string::* assign_func)(const char* _Ptr);
-  inline static void (PDTH_MSVC2008_string::* assign_func_len)(const char* _Ptr, unsigned int len);
-  void assign(const char* _Ptr) {
-    (this->*assign_func)(_Ptr);
-  }
-  void assign(const char* _Ptr, unsigned int len) {
-    (this->*assign_func_len)(_Ptr, len);
-  }
-
-  char PAD[3];
-  union {
-    char data[16];
-    char* ptr;
-  };
-  unsigned int _Mysize;
-  unsigned int _Myres;
-
-  const char* get_str() const
-  {
-    if (_Myres > 15) {
-      return ptr;
-    }
-    else {
-      return data;
-    }
-  }
-};
 
 struct FileDataStore {
   virtual ~FileDataStore();
@@ -320,8 +221,16 @@ struct TwoLayerTransport {
   }
 };
 
+#pragma optimize("", off)
 void ModOverridesState::CollectModOverrides(DB* dieselDb) {
   this->overrides.clear();
+
+  //dieselDb->_data->_lookup._data._allocator = (Allocator*)dieselDb;
+  //dieselDb->_data->_lookup._data.set_capacity(dieselDb->_data->_lookup._data._size * 2);
+  //int lower = dieselDb->lower_bound(hash64("banksino"), hash64("existing_banks"));
+  //int upper = dieselDb->upper_bound(hash64("banksino"), hash64("existing_banks"));
+
+  //auto entry = dieselDb->_data->_lookup._data._data[lower];
 
   const std::filesystem::path mod_overrides_root = "./assets/mod_overrides";
 
