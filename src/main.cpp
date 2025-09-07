@@ -501,8 +501,8 @@ void setup_create_entry_hooks() {
 #pragma endregion
 
 void setup_modoverrides_mod() {
-  if (AttachConsole(ATTACH_PARENT_PROCESS) || AllocConsole())
-    freopen("CONOUT$", "w", stdout);
+  /*if (AttachConsole(ATTACH_PARENT_PROCESS) || AllocConsole())
+    freopen("CONOUT$", "w", stdout);*/
 
   GET_CLASS_FUNC(CONCAT_ARGS(SortMap<DBExtKey,unsigned int>::lower_bound_index_func), "\x83\xEC\x00\x55\x56\x57\x8B\xF9\x8B\x77\x00\xC7\x44\x24", "xx?xxxxxxx?xxx");
   GET_CLASS_FUNC(CONCAT_ARGS(SortMap<DBExtKey,unsigned int>::upper_bound_index_func), "\x83\xEC\x00\x53\x55\x56\x8B\xF1\x8B\x5E\x00\xC7\x44\x24", "xx?xxxxxxx?xxx");
