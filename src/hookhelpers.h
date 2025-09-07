@@ -40,15 +40,19 @@ void* get_class_func_addr(memberT classT::* func)
 if(status != MH_OK) {\
 std::cout << debugname ": " << MH_StatusToString(status);\
 }
+#define HOOK_HELPERS_CREATE_HOOK(name, addr_, hook_addr, original_addr) \
+{\
+auto addr = (void*)(addr_); \
+MH_STATUS status = MH_CreateHook((LPVOID)(addr), (hook_addr), (LPVOID*)(original_addr));\
+MH_STATUS_CHECK(name " CreateHook", status);\
+status = MH_EnableHook((LPVOID)(addr));\
+MH_STATUS_CHECK(name " EnableHook", status);\
+}
 
 #define X86_THISCALL_HOOK_HELPER_HOOK_CLASS_FUNCTION_ADDRESS(classname, name, address) \
-{\
-auto addr = (void*)address;\
-MH_STATUS status = MH_CreateHook((LPVOID)addr, get_class_func_addr(&classname::h_##name), (LPVOID*)get_class_func_addr(&classname::o_##name));\
-MH_STATUS_CHECK(#classname "::" #name " CreateHook", status)\
-status = MH_EnableHook((LPVOID)addr);\
-MH_STATUS_CHECK(#classname "::" #name " EnableHook", status)\
-}
+HOOK_HELPERS_CREATE_HOOK(#classname "::" #name, address, get_class_func_addr(&classname::h_##name), get_class_func_addr(&classname::o_##name));
 
 #define X86_THISCALL_HOOK_HELPER_HOOK_CLASS_FUNCTION(classname, name, pattern, mask) \
 X86_THISCALL_HOOK_HELPER_HOOK_CLASS_FUNCTION_ADDRESS(classname, name, FindPattern(gameexecutable, #classname "::" #name, pattern, mask));
+#define X86_NONTHISCALL_HOOK_HELPER_HOOK_FUNCTION(name, pattern, mask) \
+HOOK_HELPERS_CREATE_HOOK(#name, FindPattern(gameexecutable, #name, pattern, mask), h_##name, &o_##name)

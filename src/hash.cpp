@@ -139,10 +139,10 @@ unsigned long long hash64(
   return c;
 }
 
+unsigned long long hash64(const char* s) {
+  return hash64((char*)s, strlen(s), 0);
+}
+
 unsigned long long hash64(const std::string& s) {
-  char* temp = new char[s.length() + 1];
-  strcpy(temp, s.c_str());
-  auto hash = hash64(temp, s.length(), 0);
-  delete[] temp;
-  return hash;
+  return hash64((char*)s.c_str(), s.length(), 0);
 }

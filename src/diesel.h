@@ -34,6 +34,35 @@ template<typename TValue> struct Vector {
     }
   }
 
+  TValue& insert(size_t at, const TValue& value)
+  {
+    return insert(begin() + at, value);
+  }
+  TValue& insert(TValue* at, const TValue& value)
+  {
+    TValue* dest = at;
+    if (this->_size + 1 > this->_capacity) {
+      size_t offset = dest - this->_data;
+      this->set_capacity(2 * this->_capacity + 10);
+      dest = this->_data + offset;
+    }
+    memmove(&dest[1], dest, sizeof(TValue) * (this->end() - dest));
+    if (dest)
+      *dest = value;
+    this->_size += 1;
+    return *dest;
+  }
+
+  void erase(size_t at)
+  {
+    return erase(begin() + at);
+  }
+  void erase(TValue* at)
+  {
+    memmove(at, &at[1], sizeof(TValue) * (this->end() - at) - sizeof(TValue));
+    this->_size -= 1;
+  }
+
   TValue* begin() const { return _data; }
   TValue* end() const { return &_data[_size]; }
 };

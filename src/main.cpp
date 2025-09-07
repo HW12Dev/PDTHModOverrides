@@ -15,7 +15,9 @@
 #include <iostream>
 #include <set>
 
-
+const char* gameexecutable = "payday_win32_release.exe";
+#define GET_CLASS_FUNC(dest, pattern, mask) *((size_t*)get_class_func_addr(&dest)) = FindPattern(gameexecutable, #dest, pattern, mask);
+#define GET_FUNCTION(dest, pattern, mask) *((size_t*)&dest) = FindPattern(gameexecutable, #dest, pattern, mask);
 void* (__cdecl* diesel_malloc)(unsigned int size);
 
 namespace dsl {
@@ -24,8 +26,28 @@ namespace dsl {
 
     idstring() {}
     idstring(unsigned long long id) : _id(id) {}
+
+    bool operator==(const dsl::idstring& other) const
+    {
+      return this->_id == other._id;
+    }
+    bool operator!=(const dsl::idstring& other) const
+    {
+      return !(*this == other);
+    }
+    bool operator<(const dsl::idstring& other) const
+    {
+      return this->_id < other._id;
+    }
+  };
+  struct ResourceID {
+    idstring type;
+    idstring name;
+
+    ResourceID(idstring type, idstring name) : type(type), name(name) {}
   };
 }
+
 struct DBExtKey {
 
   dsl::idstring _type;
@@ -88,6 +110,8 @@ __declspec(dllexport) bool __stdcall DoesModOverrideDBKey(unsigned int dbKey)
 
 __declspec(dllexport) void __stdcall AddOverride(unsigned int dbKey, const char* replacementFile)
 {
+  if (!replacementFile || !std::filesystem::exists(replacementFile) || std::filesystem::is_directory(replacementFile))
+    return;
   globalModOverridesState.AddOverride(dbKey, replacementFile);
 }
 
@@ -103,7 +127,7 @@ struct DB {
   Data* _data;
 
 
-  __forceinline int lower_bound(dsl::idstring type, dsl::idstring name) {
+  __forceinline int lower_bound(dsl::idstring type, dsl::idstring name) const {
     DBExtKey k;
     k._name = name;
     k._type = type;
@@ -111,13 +135,24 @@ struct DB {
 
     return this->_data->_lookup.lower_bound_index(&k);
   }
-  __forceinline int upper_bound(dsl::idstring type, dsl::idstring name) {
+  __forceinline int upper_bound(dsl::idstring type, dsl::idstring name) const {
     DBExtKey k;
     k._name = name;
     k._type = type;
     k._properties = -1;
 
     return this->_data->_lookup.upper_bound_index(&k);
+  }
+
+  bool contains(dsl::idstring type, dsl::idstring name) const {
+    return lower_bound(type, name) != upper_bound(type, name);
+  }
+
+  Pair<DBExtKey, unsigned int>& add_entry(dsl::idstring type, dsl::idstring name) {
+    return _data->_lookup._data.insert(lower_bound(type, name), Pair<DBExtKey, unsigned int>{
+      .first = DBExtKey{ ._type = type, ._name = name, ._properties = 0 },
+        .second = ++_data->_next_key
+    });
   }
 
   X86_THISCALL_HOOK_HELPER_DEFINE_FUNCTION(DB, load, int, CONCAT_ARGS()) {
@@ -216,21 +251,29 @@ struct TwoLayerTransport {
         return result;
       }
     }
+    if (globalModOverridesState.IsCreatedEntry(key)) {
+      auto& createdEntry = globalModOverridesState.GetCreatedEntry(key);
+
+      if (std::filesystem::exists(createdEntry)) {
+        result->create(createdEntry);
+        return result;
+      }
+    }
     return (this->*o_open)(result, key);
     
   }
 };
 
 #pragma optimize("", off)
+DB* globalDb = nullptr;
 void ModOverridesState::CollectModOverrides(DB* dieselDb) {
+  globalDb = dieselDb;
+  auto& data = dieselDb->_data->_lookup._data;
+  // Blob loaded arrays get a dummy allocator that will never make allocations.
+  // Changing the allocator to the one used to create the array.
+  data._allocator = (Allocator*)((char*)dieselDb + 4);
+
   this->overrides.clear();
-
-  //dieselDb->_data->_lookup._data._allocator = (Allocator*)dieselDb;
-  //dieselDb->_data->_lookup._data.set_capacity(dieselDb->_data->_lookup._data._size * 2);
-  //int lower = dieselDb->lower_bound(hash64("banksino"), hash64("existing_banks"));
-  //int upper = dieselDb->upper_bound(hash64("banksino"), hash64("existing_banks"));
-
-  //auto entry = dieselDb->_data->_lookup._data._data[lower];
 
   const std::filesystem::path mod_overrides_root = "./assets/mod_overrides";
 
@@ -281,9 +324,185 @@ void ModOverridesState::CollectModOverrides(DB* dieselDb) {
   }
 }
 
-#define GET_CLASS_FUNC(dest, pattern, mask) *((size_t*)get_class_func_addr(&dest)) = FindPattern(gameexecutable, #dest, pattern, mask);
+#pragma region DB:create_entry and DB:remove_entry
+struct lua_State;
+void (__cdecl* lua_pushcclosure)(lua_State* L, int(*fn)(lua_State* L), int n);
+void (__cdecl* lua_setfield)(lua_State* L, int idx, const char* k);
+const char*(__cdecl* lua_tolstring)(lua_State* L, int idx, size_t* len);
+void*(__cdecl* lua_touserdata)(lua_State* L, int idx);
+int  (__cdecl* lua_type)(lua_State* L, int idx);
+#define LUA_TSTRING 4
+#define LUA_TUSERDATA 7
+#define lua_tostring(L, i) lua_tolstring(L, (i), NULL)
+
+dsl::idstring get_as_idstring_lua(lua_State* L, int idx)
+{
+  if (lua_type(L, idx) == LUA_TUSERDATA) {
+    return *(dsl::idstring*)lua_touserdata(L, idx);
+  }
+  else if (lua_type(L, idx) == LUA_TSTRING) {
+    return hash64(lua_tostring(L, idx));
+  }
+  else {
+    return hash64("");
+  }
+}
+
+void MainDB__create_entry(dsl::idstring type, dsl::idstring name, const char* path)
+{
+  std::set<unsigned int> dbKeysToOverwrite;
+
+  if (globalDb->contains(type, name)) {
+    auto upper = globalDb->upper_bound(type, name);
+    auto lower = globalDb->lower_bound(type, name);
+
+    for (unsigned int lookupIndex = lower; lookupIndex < upper; lookupIndex++) {
+      auto& entry = globalDb->_data->_lookup._data._data[lookupIndex];
+      if (entry.first._name == name && entry.first._type == type) {
+        dbKeysToOverwrite.insert(entry.second);
+      }
+    }
+  }
+  else {
+    auto& entry = globalDb->add_entry(type, name);
+    dbKeysToOverwrite.insert(entry.second);
+  }
+
+  for (unsigned int key : dbKeysToOverwrite) {
+    globalModOverridesState.LogCreatedEntry(key, path);
+  }
+
+}
+void MainDB__remove_entry(dsl::idstring type, dsl::idstring name) {
+  std::set<unsigned int> dbKeysToRemove;
+  std::vector<size_t> indicesToErase;
+
+  if (globalDb->contains(type, name)) {
+    auto upper = globalDb->upper_bound(type, name);
+    auto lower = globalDb->lower_bound(type, name);
+
+    for (unsigned int lookupIndex = lower; lookupIndex < upper; lookupIndex++) {
+      auto& entry = globalDb->_data->_lookup._data._data[lookupIndex];
+      if (entry.first._name == name && entry.first._type == type) {
+        dbKeysToRemove.insert(entry.second);
+        indicesToErase.push_back(lookupIndex);
+      }
+    }
+  }
+
+  std::sort(indicesToErase.begin(), indicesToErase.end(), [](const size_t& a, const size_t& b) {
+    return a > b;
+    });
+
+
+
+  for (auto& key : dbKeysToRemove) {
+    globalModOverridesState.LogRemovedEntry(key);
+  }
+  for (auto index : indicesToErase) {
+    globalDb->_data->_lookup._data.erase(index);
+  }
+
+}
+
+enum DBCreateEntryNativeErrorCodes : int {
+  _NO_ERROR = 0,
+  INVALID_PATH = 1,
+  PATH_DOES_NOT_EXIST = 2,
+  DB_NOT_CREATED = 3
+};
+__declspec(dllexport) DBCreateEntryNativeErrorCodes __stdcall DBCreateEntry(unsigned long long type, unsigned long long name, const char* path)
+{
+  if (!path)
+    return INVALID_PATH;
+  if (!globalDb)
+    return DB_NOT_CREATED;
+  if (!std::filesystem::exists(path) || std::filesystem::is_directory(path))
+    return INVALID_PATH;
+
+  MainDB__create_entry(type, name, path);
+  return _NO_ERROR;
+}
+__declspec(dllexport) DBCreateEntryNativeErrorCodes __stdcall DBRemoveEntry(unsigned long long type, unsigned long long name)
+{
+  if (!globalDb)
+    return DB_NOT_CREATED;
+  MainDB__remove_entry(type, name);
+  return _NO_ERROR;
+}
+__declspec(dllexport) bool __stdcall DBHasEntry(unsigned long long type, unsigned long long name)
+{
+  if (!globalDb)
+    return false;
+  return globalDb->contains(type, name);
+}
+
+__declspec(dllexport) void __stdcall DBReloadOverrideMods()
+{
+  if (!globalDb)
+    return;
+  globalModOverridesState.CollectModOverrides(globalDb);
+}
+
+int DB_script_create_entry(lua_State* L) {
+  // MainDB is first argument, but gets passed as a Diesel WeakPointer reference, so a global is used instead as only one can ever exist
+  dsl::idstring type = get_as_idstring_lua(L, 2);
+  dsl::idstring name = get_as_idstring_lua(L, 3);
+  const char* path = lua_tostring(L, 4);
+
+  if (!path)
+    return 0;
+
+  if (!std::filesystem::exists(path) || std::filesystem::is_directory(path))
+    return 0;
+  MainDB__create_entry(type, name, path);
+
+  return 0;
+}
+int DB_script_remove_entry(lua_State* L) {
+  // MainDB is first argument, but gets passed as a Diesel WeakPointer reference, so a global is used instead as only one can ever exist
+  dsl::idstring type = get_as_idstring_lua(L, 2);
+  dsl::idstring name = get_as_idstring_lua(L, 3);
+
+  MainDB__remove_entry(type, name);
+  return 0;
+}
+
+int DB_script_reload_override_mods(lua_State* L)
+{
+  if (!globalDb)
+    return 0;
+  globalModOverridesState.CollectModOverrides(globalDb);
+  return 0;
+}
+
+X86_NONTHISCALL_HOOK_HELPER_DEFINE_FUNCTION(dsl__MainDB__add_members, __cdecl, void, CONCAT_ARGS(lua_State* L)) {
+  o_dsl__MainDB__add_members(L);
+  lua_pushcclosure(L, DB_script_create_entry, 0);
+  lua_setfield(L, -2, "create_entry");
+  lua_pushcclosure(L, DB_script_remove_entry, 0);
+  lua_setfield(L, -2, "remove_entry");
+  lua_pushcclosure(L, DB_script_reload_override_mods, 0);
+  lua_setfield(L, -2, "reload_override_mods");
+}
+
+
+void setup_create_entry_hooks() {
+  // dsl::MainDB::add_members is too generic to get a signature for
+  HOOK_HELPERS_CREATE_HOOK("dsl__MainDB__add_members", ((size_t)GetModuleHandle(gameexecutable) + 0x00389290), h_dsl__MainDB__add_members, &o_dsl__MainDB__add_members);
+  //X86_NONTHISCALL_HOOK_HELPER_HOOK_FUNCTION(dsl__MainDB__add_members, "", "");
+
+  GET_FUNCTION(lua_pushcclosure, "\x56\x8B\x74\x24\x00\x8B\x46\x00\x83\x78\x00\x00\x57\x74\x00\xFF\x48\x00\x56\xE8\x00\x00\x00\x00\x83\xC4\x00\x8B\x46\x00\x8B\x48\x00\x3B\x48\x00\x72\x00\x56\xE8\x00\x00\x00\x00\x83\xC4\x00\x8B\x46", "xxxx?xx?xx??xx?xx?xx????xx?xx?xx?xx?x?xx????xx?xx");
+  GET_FUNCTION(lua_setfield, "\x8B\x4C\x24\x00\x83\xEC\x00\x53\x56\x8B\x74\x24\x00\x57\x8B\xD6\xE8\x00\x00\x00\x00\x8B\x54\x24\x00\x8B\xF8\x8B\xC2\x8D\x58\x00\x8A\x08\x40\x84\xC9\x75\x00\x2B\xC3\x50\x52\x56\xE8\x00\x00\x00\x00\x89\x44\x24\x00\x8B\x46\x00\x83\xE8", "xxx?xx?xxxxx?xxxx????xxx?xxxxxx?xxxxxx?xxxxxx????xxx?xx?xx");
+  GET_FUNCTION(lua_tolstring, "\x56\x8B\x74\x24\x00\x57\x8B\x7C\x24\x00\x8B\xCF\x8B\xD6\xE8\x00\x00\x00\x00\x83\x78", "xxxx?xxxx?xxxxx????xx");
+  GET_FUNCTION(lua_touserdata, "\x8B\x4C\x24\x00\x8B\x54\x24\x00\xE8\x00\x00\x00\x00\x8B\x48\x00\x83\xE9", "xxx?xxx?x????xx?xx");
+  GET_FUNCTION(lua_type, "\x8B\x4C\x24\x00\x8B\x54\x24\x00\xE8\x00\x00\x00\x00\x3D\x00\x00\x00\x00\x75", "xxx?xxx?x????x????x");
+}
+#pragma endregion
+
 void setup_modoverrides_mod() {
-  const char* gameexecutable = "payday_win32_release.exe";
+  if (AttachConsole(ATTACH_PARENT_PROCESS) || AllocConsole())
+    freopen("CONOUT$", "w", stdout);
 
   GET_CLASS_FUNC(CONCAT_ARGS(SortMap<DBExtKey,unsigned int>::lower_bound_index_func), "\x83\xEC\x00\x55\x56\x57\x8B\xF9\x8B\x77\x00\xC7\x44\x24", "xx?xxxxxxx?xxx");
   GET_CLASS_FUNC(CONCAT_ARGS(SortMap<DBExtKey,unsigned int>::upper_bound_index_func), "\x83\xEC\x00\x53\x55\x56\x8B\xF1\x8B\x5E\x00\xC7\x44\x24", "xx?xxxxxxx?xxx");
@@ -297,6 +516,8 @@ void setup_modoverrides_mod() {
 
   X86_THISCALL_HOOK_HELPER_HOOK_CLASS_FUNCTION(DB, load, "\x6A\x00\x68\x00\x00\x00\x00\x64\xA1\x00\x00\x00\x00\x50\x64\x89\x25\x00\x00\x00\x00\x81\xEC\x00\x00\x00\x00\x53\x55\x56\x57\x33\xDB\x53", "x?x????xx????xxxx????xx????xxxxxxx");
   X86_THISCALL_HOOK_HELPER_HOOK_CLASS_FUNCTION(TwoLayerTransport, open, "\x6A\x00\x68\x00\x00\x00\x00\x64\xA1\x00\x00\x00\x00\x50\x64\x89\x25\x00\x00\x00\x00\x83\xEC\x00\x56\x8B\xF1\x83\x7E\x00\x00\x57", "x?x????xx????xxxx????xx?xxxxx??x");
+
+  setup_create_entry_hooks();
 }
 
 BOOL __stdcall DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
